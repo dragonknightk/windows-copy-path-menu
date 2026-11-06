@@ -1,0 +1,35 @@
+#include <winver.h>
+#pragma code_page(65001)
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+#ifdef _DEBUG
+FILEFLAGS       VS_FF_DEBUG
+#else
+FILEFLAGS       0x0L
+#endif
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404B0"
+        BEGIN
+            VALUE "CompanyName",      "DragonKnightK\0"
+            VALUE "FileDescription",  "Windows 右键菜单“复制路径”本地 COM 服务\0"
+            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "InternalName",     "copy-path.exe\0"
+            VALUE "LegalCopyright",   "Copyright (c) DragonKnightK. MIT License.\0"
+            VALUE "OriginalFilename", "copy-path.exe\0"
+            VALUE "ProductName",      "DragonKnightK.CopyPathMenu\0"
+            VALUE "ProductVersion",   "1.0.0.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END
