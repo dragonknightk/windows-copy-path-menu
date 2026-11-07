@@ -14,6 +14,7 @@ $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $installTests = Join-Path $projectRoot 'tests\Install.Tests.ps1'
 $releaseExe = Join-Path $projectRoot 'release\copy-path.exe'
 $checksumFile = Join-Path $projectRoot 'release\SHA256SUMS.txt'
+$setHotkeyBat = Join-Path $projectRoot 'set-hotkey.bat'
 
 Write-Output '=== [1/3] 编译并运行 C++ 源码与 COM 契约回归测试 ==='
 $unitBuild = & $buildScript -Target UnitTests
@@ -33,6 +34,9 @@ if (-not (Test-Path -LiteralPath $releaseExe -PathType Leaf)) {
 }
 if (-not (Test-Path -LiteralPath $checksumFile -PathType Leaf)) {
     throw "缺少校验文件：$checksumFile"
+}
+if (-not (Test-Path -LiteralPath $setHotkeyBat -PathType Leaf)) {
+    throw "缺少快捷键设置入口脚本：$setHotkeyBat"
 }
 $checksumLine = ([IO.File]::ReadAllText($checksumFile, [Text.Encoding]::UTF8) -replace '(\r?\n)?$', '')
 if ($checksumLine -cnotmatch '^(?<hash>[0-9A-Fa-f]{64})[ \t]+\*?copy-path\.exe$') {
@@ -54,6 +58,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "copy-path.exe --version 退出码异常：$LASTEXITCODE"
 }
 
-Write-Output "通过：release\copy-path.exe SHA-256 ($actualHash) 与版本资源核验完成。"
+$hotkeyOutput = (& $releaseExe --get-hotkey | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($hotkeyOutput)) {
+    throw "copy-path.exe --get-hotkey 失败，退出码：$LASTEXITCODE，输出：$hotkeyOutput"
+}
+
+Write-Output "通过：release\copy-path.exe SHA-256 ($actualHash)、版本资源与快捷键接口 ($hotkeyOutput) 核验完成。"
 Write-Output ''
 Write-Output '全部自动化测试与发布包核验均已通过！'

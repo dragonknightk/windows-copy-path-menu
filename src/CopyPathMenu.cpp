@@ -1,11 +1,15 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <shlguid.h>
+#include <exdisp.h>
 #include <objbase.h>
+#include <commctrl.h>
 #include <wrl/client.h>
 #include <algorithm>
+#include <cwctype>
 #include <new>
 #include <string>
 #include <utility>
@@ -21,6 +25,16 @@ namespace
     const DWORD kClipboardAttempts = 5;
     const DWORD kClipboardRetryMilliseconds = 40;
     const DWORD kIdleTimeoutMilliseconds = 30000;
+
+    const wchar_t* const kSettingsRegistrySubkey = L"Software\\DragonKnightK.CopyPathMenu";
+    const wchar_t* const kHotkeyWindowClass = L"DragonKnightK.CopyPathMenu.HotkeyHost";
+    const wchar_t* const kConfigWindowClass = L"DragonKnightK.CopyPathMenu.ConfigDialog";
+
+    const int kActiveHotkeyId = 1;
+    const int kProbeHotkeyId = 2;
+    const UINT kMsgReloadHotkey = WM_APP + 1;
+    const UINT kMsgSuspendHotkey = WM_APP + 2;
+    const UINT kMsgStopDaemon = WM_APP + 3;
 
     HANDLE g_activityEvent = NULL;
     volatile LONG g_objectCount = 0;
@@ -263,69 +277,23 @@ namespace
         bool emitted = false;
     };
 
-    HRESULT GetPathsInViewOrder(IShellItemArray* selection, IUnknown* site,
+    HRESULT OrderSelectionByFolderView(std::vector<SelectedPath>& selected, IFolderView* view,
         std::vector<std::wstring>* paths)
     {
-        if (selection == NULL)
+        if (view == NULL || paths == NULL)
         {
-            return E_FAIL;
+            return E_NOINTERFACE;
         }
 
-        DWORD count = 0;
-        HRESULT result = selection->GetCount(&count);
-        if (FAILED(result))
-        {
-            return result;
-        }
-        if (count == 0)
-        {
-            return E_INVALIDARG;
-        }
-
-        std::vector<SelectedPath> selected;
-        selected.reserve(count);
-        for (DWORD index = 0; index < count; ++index)
-        {
-            SelectedPath entry;
-            result = selection->GetItemAt(index, &entry.item);
-            if (FAILED(result) || !entry.item)
-            {
-                return FAILED(result) ? result : E_FAIL;
-            }
-
-            CoTaskMemString path;
-            result = entry.item->GetDisplayName(SIGDN_FILESYSPATH, &path.value);
-            if (FAILED(result) || path.value == NULL || path.value[0] == L'\0')
-            {
-                return FAILED(result) ? result : E_FAIL;
-            }
-            entry.path = path.value;
-            selected.push_back(std::move(entry));
-        }
-
-        paths->clear();
-        paths->reserve(count);
-        if (count == 1)
-        {
-            paths->push_back(selected[0].path);
-            return S_OK;
-        }
-
-        ComPtr<IFolderView> view;
-        result = GetCallerFolderView(site, &view);
-        if (FAILED(result))
-        {
-            return result;
-        }
-
+        const DWORD count = static_cast<DWORD>(selected.size());
         ComPtr<IShellItemArray> visibleItems;
-        result = view->Items(SVGIO_ALLVIEW | SVGIO_FLAG_VIEWORDER, IID_PPV_ARGS(&visibleItems));
+        HRESULT result = view->Items(SVGIO_ALLVIEW | SVGIO_FLAG_VIEWORDER, IID_PPV_ARGS(&visibleItems));
         if (FAILED(result) || !visibleItems)
         {
             return FAILED(result) ? result : E_FAIL;
         }
 
-        // 保留菜单触发时的对象快照；视图只提供次序，后续选择变化不能改变复制对象。
+        // 保留触发时的对象快照；视图只提供次序，后续选择变化不能改变复制对象。
         // 用 Shell 的规范身份匹配，避免按路径字符串比较误处理大小写或同名对象。
         std::stable_sort(selected.begin(), selected.end(), [](const SelectedPath& left, const SelectedPath& right) {
             return CompareShellItems(left.item.Get(), right.item.Get()) < 0;
@@ -360,6 +328,204 @@ namespace
             }
         }
         return paths->size() == count ? S_OK : HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+
+    HRESULT CollectSelectedEntries(IShellItemArray* selection, std::vector<SelectedPath>* selected)
+    {
+        if (selection == NULL || selected == NULL)
+        {
+            return E_FAIL;
+        }
+
+        DWORD count = 0;
+        HRESULT result = selection->GetCount(&count);
+        if (FAILED(result))
+        {
+            return result;
+        }
+        if (count == 0)
+        {
+            return E_INVALIDARG;
+        }
+
+        selected->clear();
+        selected->reserve(count);
+        for (DWORD index = 0; index < count; ++index)
+        {
+            SelectedPath entry;
+            result = selection->GetItemAt(index, &entry.item);
+            if (FAILED(result) || !entry.item)
+            {
+                return FAILED(result) ? result : E_FAIL;
+            }
+
+            CoTaskMemString path;
+            result = entry.item->GetDisplayName(SIGDN_FILESYSPATH, &path.value);
+            if (FAILED(result) || path.value == NULL || path.value[0] == L'\0')
+            {
+                return FAILED(result) ? result : E_FAIL;
+            }
+            entry.path = path.value;
+            selected->push_back(std::move(entry));
+        }
+        return S_OK;
+    }
+
+    HRESULT GetPathsInViewOrder(IShellItemArray* selection, IUnknown* site,
+        std::vector<std::wstring>* paths)
+    {
+        std::vector<SelectedPath> selected;
+        HRESULT result = CollectSelectedEntries(selection, &selected);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        paths->clear();
+        paths->reserve(selected.size());
+        if (selected.size() == 1)
+        {
+            paths->push_back(selected[0].path);
+            return S_OK;
+        }
+
+        ComPtr<IFolderView> view;
+        result = GetCallerFolderView(site, &view);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        return OrderSelectionByFolderView(selected, view.Get(), paths);
+    }
+
+    HRESULT GetCurrentFolderPathFromView(IFolderView* view, std::wstring* folderPath)
+    {
+        if (view == NULL || folderPath == NULL)
+        {
+            return E_INVALIDARG;
+        }
+
+        ComPtr<IShellItem> folderItem;
+        HRESULT result = view->GetFolder(IID_PPV_ARGS(&folderItem));
+        if (FAILED(result) || !folderItem)
+        {
+            ComPtr<IPersistFolder2> persistFolder;
+            result = view->GetFolder(IID_PPV_ARGS(&persistFolder));
+            if (FAILED(result) || !persistFolder)
+            {
+                return FAILED(result) ? result : E_FAIL;
+            }
+
+            PIDLIST_ABSOLUTE folderPidl = NULL;
+            result = persistFolder->GetCurFolder(&folderPidl);
+            if (FAILED(result) || folderPidl == NULL)
+            {
+                return FAILED(result) ? result : E_FAIL;
+            }
+
+            result = SHCreateItemFromIDList(folderPidl, IID_PPV_ARGS(&folderItem));
+            CoTaskMemFree(folderPidl);
+            if (FAILED(result) || !folderItem)
+            {
+                return FAILED(result) ? result : E_FAIL;
+            }
+        }
+
+        CoTaskMemString rawPath;
+        result = folderItem->GetDisplayName(SIGDN_FILESYSPATH, &rawPath.value);
+        if (FAILED(result) || rawPath.value == NULL || rawPath.value[0] == L'\0')
+        {
+            return FAILED(result) ? result : E_FAIL;
+        }
+
+        *folderPath = rawPath.value;
+        return S_OK;
+    }
+
+    HRESULT ExtractPathsFromFolderView(IFolderView* view, std::vector<std::wstring>* paths)
+    {
+        if (view == NULL || paths == NULL)
+        {
+            return E_INVALIDARG;
+        }
+
+        paths->clear();
+        int selectedCount = 0;
+        HRESULT result = view->ItemCount(SVGIO_SELECTION, &selectedCount);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        if (selectedCount <= 0)
+        {
+            std::wstring currentFolder;
+            result = GetCurrentFolderPathFromView(view, &currentFolder);
+            if (FAILED(result))
+            {
+                return result;
+            }
+            paths->push_back(std::move(currentFolder));
+            return S_OK;
+        }
+
+        ComPtr<IShellItemArray> selection;
+        result = view->Items(SVGIO_SELECTION, IID_PPV_ARGS(&selection));
+        if (FAILED(result) || !selection)
+        {
+            return FAILED(result) ? result : E_FAIL;
+        }
+
+        std::vector<SelectedPath> selected;
+        result = CollectSelectedEntries(selection.Get(), &selected);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        paths->reserve(selected.size());
+        if (selected.size() == 1)
+        {
+            paths->push_back(selected[0].path);
+            return S_OK;
+        }
+
+        return OrderSelectionByFolderView(selected, view, paths);
+    }
+
+    HRESULT CopyFromFolderView(IFolderView* view)
+    {
+        try
+        {
+            std::vector<std::wstring> paths;
+            HRESULT result = ExtractPathsFromFolderView(view, &paths);
+            if (FAILED(result))
+            {
+                return result;
+            }
+
+            std::wstring text;
+            result = FormatPaths(paths, &text);
+            if (FAILED(result))
+            {
+                return result;
+            }
+
+            return CopyUnicodeTextWithRetry(text);
+        }
+        catch (const ShellOperationError& error)
+        {
+            return error.result;
+        }
+        catch (const std::bad_alloc&)
+        {
+            return E_OUTOFMEMORY;
+        }
+        catch (...)
+        {
+            return E_FAIL;
+        }
     }
 
     HRESULT CopyShellSelection(IShellItemArray* selection, IUnknown* site)
@@ -868,6 +1034,1179 @@ namespace
         return result;
     }
 
+    // =========================================================================
+    // 快捷键配置管理、前台 Explorer 窗口感知与自定义配置界面
+    // =========================================================================
+
+    struct HotkeyConfig
+    {
+        bool enabled = true;
+        UINT modifiers = MOD_ALT;
+        UINT virtualKey = 'C';
+    };
+
+    bool IsValidHotkeyCombination(UINT modifiers, UINT virtualKey)
+    {
+        const UINT allowedModifiers = MOD_ALT | MOD_CONTROL | MOD_SHIFT;
+        if ((modifiers & ~allowedModifiers) != 0)
+        {
+            return false;
+        }
+        if (virtualKey < 0x08 || virtualKey > 0xFE)
+        {
+            return false;
+        }
+        if (virtualKey == VK_SHIFT || virtualKey == VK_CONTROL || virtualKey == VK_MENU
+            || virtualKey == VK_LWIN || virtualKey == VK_RWIN)
+        {
+            return false;
+        }
+        const bool isFunctionKey = (virtualKey >= VK_F1 && virtualKey <= VK_F24);
+        if (!isFunctionKey && (modifiers & (MOD_ALT | MOD_CONTROL)) == 0)
+        {
+            // 普通字母或数字键必须至少包含 Alt 或 Ctrl，防止干扰资源管理器内的正常重命名输入。
+            return false;
+        }
+        return true;
+    }
+
+    bool TryReadHotkeyConfigFromRoot(HKEY rootKey, HotkeyConfig* config)
+    {
+        HKEY key = NULL;
+        if (RegOpenKeyExW(rootKey, kSettingsRegistrySubkey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        {
+            return false;
+        }
+
+        DWORD enabled = 1;
+        DWORD modifiers = MOD_ALT;
+        DWORD virtualKey = 'C';
+        DWORD size = sizeof(DWORD);
+        DWORD type = 0;
+
+        const LONG enabledStatus = RegQueryValueExW(
+            key, L"HotkeyEnabled", NULL, &type, reinterpret_cast<LPBYTE>(&enabled), &size);
+        if (enabledStatus != ERROR_SUCCESS || type != REG_DWORD)
+        {
+            RegCloseKey(key);
+            return false;
+        }
+
+        size = sizeof(DWORD);
+        const LONG modStatus = RegQueryValueExW(
+            key, L"HotkeyModifiers", NULL, &type, reinterpret_cast<LPBYTE>(&modifiers), &size);
+        size = sizeof(DWORD);
+        const LONG vkStatus = RegQueryValueExW(
+            key, L"HotkeyVirtualKey", NULL, &type, reinterpret_cast<LPBYTE>(&virtualKey), &size);
+        RegCloseKey(key);
+
+        if (enabled == 0)
+        {
+            config->enabled = false;
+            if (modStatus == ERROR_SUCCESS && vkStatus == ERROR_SUCCESS
+                && IsValidHotkeyCombination(modifiers, virtualKey))
+            {
+                config->modifiers = modifiers;
+                config->virtualKey = virtualKey;
+            }
+            else
+            {
+                config->modifiers = MOD_ALT;
+                config->virtualKey = 'C';
+            }
+            return true;
+        }
+
+        if (modStatus != ERROR_SUCCESS || vkStatus != ERROR_SUCCESS
+            || !IsValidHotkeyCombination(modifiers, virtualKey))
+        {
+            return false;
+        }
+
+        config->enabled = true;
+        config->modifiers = modifiers;
+        config->virtualKey = virtualKey;
+        return true;
+    }
+
+    HotkeyConfig LoadHotkeyConfig()
+    {
+        HotkeyConfig config;
+        if (TryReadHotkeyConfigFromRoot(HKEY_CURRENT_USER, &config))
+        {
+            return config;
+        }
+        if (TryReadHotkeyConfigFromRoot(HKEY_LOCAL_MACHINE, &config))
+        {
+            return config;
+        }
+        return config;
+    }
+
+    HRESULT SaveHotkeyConfig(const HotkeyConfig& config)
+    {
+        if (config.enabled && !IsValidHotkeyCombination(config.modifiers, config.virtualKey))
+        {
+            return E_INVALIDARG;
+        }
+
+        HKEY key = NULL;
+        const LONG openResult = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            kSettingsRegistrySubkey,
+            0,
+            NULL,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            NULL,
+            &key,
+            NULL);
+        if (openResult != ERROR_SUCCESS)
+        {
+            return HRESULT_FROM_WIN32(openResult);
+        }
+
+        const DWORD enabled = config.enabled ? 1u : 0u;
+        const DWORD modifiers = config.modifiers;
+        const DWORD virtualKey = config.virtualKey;
+
+        LONG writeResult = RegSetValueExW(
+            key, L"HotkeyEnabled", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&enabled), sizeof(DWORD));
+        if (writeResult == ERROR_SUCCESS)
+        {
+            writeResult = RegSetValueExW(
+                key, L"HotkeyModifiers", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&modifiers), sizeof(DWORD));
+        }
+        if (writeResult == ERROR_SUCCESS)
+        {
+            writeResult = RegSetValueExW(
+                key, L"HotkeyVirtualKey", 0, REG_DWORD, reinterpret_cast<const BYTE*>(&virtualKey), sizeof(DWORD));
+        }
+
+        RegCloseKey(key);
+        return writeResult == ERROR_SUCCESS ? S_OK : HRESULT_FROM_WIN32(writeResult);
+    }
+
+    std::wstring FormatVirtualKeyName(UINT virtualKey)
+    {
+        if ((virtualKey >= 'A' && virtualKey <= 'Z') || (virtualKey >= '0' && virtualKey <= '9'))
+        {
+            return std::wstring(1, static_cast<wchar_t>(virtualKey));
+        }
+        if (virtualKey >= VK_F1 && virtualKey <= VK_F24)
+        {
+            return L"F" + std::to_wstring(virtualKey - VK_F1 + 1);
+        }
+
+        const UINT scanCode = MapVirtualKeyW(virtualKey, MAPVK_VK_TO_VSC);
+        if (scanCode != 0)
+        {
+            wchar_t keyName[64] = {};
+            if (GetKeyNameTextW( static_cast<LONG>(scanCode << 16), keyName, 64) > 0)
+            {
+                return keyName;
+            }
+        }
+        return L"0x" + std::to_wstring(virtualKey);
+    }
+
+    std::wstring FormatHotkeyText(const HotkeyConfig& config)
+    {
+        if (!config.enabled)
+        {
+            return L"已禁用";
+        }
+
+        std::wstring text;
+        if ((config.modifiers & MOD_CONTROL) != 0)
+        {
+            text += L"Ctrl + ";
+        }
+        if ((config.modifiers & MOD_ALT) != 0)
+        {
+            text += L"Alt + ";
+        }
+        if ((config.modifiers & MOD_SHIFT) != 0)
+        {
+            text += L"Shift + ";
+        }
+        text += FormatVirtualKeyName(config.virtualKey);
+        return text;
+    }
+
+    std::wstring TrimAndUpper(const std::wstring& input)
+    {
+        size_t first = 0;
+        while (first < input.size() && iswspace(input[first]))
+        {
+            ++first;
+        }
+        size_t last = input.size();
+        while (last > first && iswspace(input[last - 1]))
+        {
+            --last;
+        }
+        std::wstring result = input.substr(first, last - first);
+        for (size_t i = 0; i < result.size(); ++i)
+        {
+            result[i] = static_cast<wchar_t>(towupper(result[i]));
+        }
+        return result;
+    }
+
+    bool ParseHotkeyString(const wchar_t* rawInput, HotkeyConfig* outConfig)
+    {
+        if (IsEmptyArgument(rawInput) || outConfig == NULL)
+        {
+            return false;
+        }
+
+        const std::wstring upper = TrimAndUpper(rawInput);
+        if (upper.empty())
+        {
+            return false;
+        }
+
+        if (upper == L"DEFAULT")
+        {
+            outConfig->enabled = true;
+            outConfig->modifiers = MOD_ALT;
+            outConfig->virtualKey = 'C';
+            return true;
+        }
+
+        if (upper == L"DISABLE" || upper == L"DISABLED" || upper == L"NONE" || upper == L"OFF")
+        {
+            outConfig->enabled = false;
+            outConfig->modifiers = MOD_ALT;
+            outConfig->virtualKey = 'C';
+            return true;
+        }
+
+        UINT modifiers = 0;
+        UINT virtualKey = 0;
+        size_t start = 0;
+        while (start <= upper.size())
+        {
+            const size_t plusIndex = upper.find(L'+', start);
+            const std::wstring token = TrimAndUpper(
+                plusIndex == std::wstring::npos ? upper.substr(start) : upper.substr(start, plusIndex - start));
+            if (token.empty())
+            {
+                return false;
+            }
+
+            if (token == L"ALT")
+            {
+                modifiers |= MOD_ALT;
+            }
+            else if (token == L"CTRL" || token == L"CONTROL")
+            {
+                modifiers |= MOD_CONTROL;
+            }
+            else if (token == L"SHIFT")
+            {
+                modifiers |= MOD_SHIFT;
+            }
+            else
+            {
+                if (virtualKey != 0)
+                {
+                    return false;
+                }
+                if (token.size() == 1 && ((token[0] >= L'A' && token[0] <= L'Z') || (token[0] >= L'0' && token[0] <= L'9')))
+                {
+                    virtualKey = static_cast<UINT>(token[0]);
+                }
+                else if (token.size() >= 2 && token[0] == L'F')
+                {
+                    int fnNumber = 0;
+                    for (size_t i = 1; i < token.size(); ++i)
+                    {
+                        if (token[i] < L'0' || token[i] > L'9')
+                        {
+                            return false;
+                        }
+                        fnNumber = fnNumber * 10 + (token[i] - L'0');
+                    }
+                    if (fnNumber < 1 || fnNumber > 24)
+                    {
+                        return false;
+                    }
+                    virtualKey = static_cast<UINT>(VK_F1 + fnNumber - 1);
+                }
+                else
+                {
+                    return false;
+                }
+            }
+
+            if (plusIndex == std::wstring::npos)
+            {
+                break;
+            }
+            start = plusIndex + 1;
+        }
+
+        if (!IsValidHotkeyCombination(modifiers, virtualKey))
+        {
+            return false;
+        }
+
+        outConfig->enabled = true;
+        outConfig->modifiers = modifiers;
+        outConfig->virtualKey = virtualKey;
+        return true;
+    }
+
+    bool IsExplorerTopLevelWindow(HWND window)
+    {
+        if (window == NULL || !IsWindow(window))
+        {
+            return false;
+        }
+
+        wchar_t className[64] = {};
+        if (GetClassNameW(window, className, static_cast<int>(sizeof(className) / sizeof(className[0]))) == 0)
+        {
+            return false;
+        }
+
+        return lstrcmpiW(className, L"CabinetWClass") == 0
+            || lstrcmpiW(className, L"ExploreWClass") == 0;
+    }
+
+    HRESULT FindActiveExplorerFolderView(HWND foregroundWindow, IFolderView** outView)
+    {
+        if (outView == NULL)
+        {
+            return E_POINTER;
+        }
+        *outView = NULL;
+
+        if (!IsExplorerTopLevelWindow(foregroundWindow))
+        {
+            return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+        }
+
+        HWND focusedChild = NULL;
+        const DWORD threadId = GetWindowThreadProcessId(foregroundWindow, NULL);
+        if (threadId != 0)
+        {
+            GUITHREADINFO guiInfo = {};
+            guiInfo.cbSize = sizeof(guiInfo);
+            if (GetGUIThreadInfo(threadId, &guiInfo))
+            {
+                focusedChild = guiInfo.hwndFocus;
+            }
+        }
+
+        ComPtr<IShellWindows> shellWindows;
+        HRESULT result = CoCreateInstance(CLSID_ShellWindows, NULL, CLSCTX_ALL, IID_PPV_ARGS(&shellWindows));
+        if (FAILED(result) || !shellWindows)
+        {
+            return FAILED(result) ? result : E_FAIL;
+        }
+
+        long count = 0;
+        result = shellWindows->get_Count(&count);
+        if (FAILED(result))
+        {
+            return result;
+        }
+
+        ComPtr<IFolderView> visibleCandidate;
+        ComPtr<IFolderView> fallbackCandidate;
+
+        for (long index = 0; index < count; ++index)
+        {
+            VARIANT position = {};
+            position.vt = VT_I4;
+            position.lVal = index;
+
+            ComPtr<IDispatch> dispatch;
+            if (FAILED(shellWindows->Item(position, &dispatch)) || !dispatch)
+            {
+                continue;
+            }
+
+            ComPtr<IServiceProvider> services;
+            if (FAILED(dispatch.As(&services)) || !services)
+            {
+                continue;
+            }
+
+            ComPtr<IShellBrowser> browser;
+            if (FAILED(services->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(&browser))) || !browser)
+            {
+                continue;
+            }
+
+            ComPtr<IShellView> shellView;
+            if (FAILED(browser->QueryActiveShellView(&shellView)) || !shellView)
+            {
+                continue;
+            }
+
+            HWND viewWindow = NULL;
+            if (FAILED(shellView->GetWindow(&viewWindow)) || viewWindow == NULL)
+            {
+                continue;
+            }
+
+            if (GetAncestor(viewWindow, GA_ROOT) != foregroundWindow)
+            {
+                continue;
+            }
+
+            ComPtr<IFolderView> candidateView;
+            if (FAILED(shellView.As(&candidateView)) || !candidateView)
+            {
+                continue;
+            }
+
+            HWND browserWindow = NULL;
+            ComPtr<IOleWindow> oleWindow;
+            if (SUCCEEDED(browser.As(&oleWindow)) && oleWindow)
+            {
+                oleWindow->GetWindow(&browserWindow);
+            }
+
+            if (focusedChild != NULL)
+            {
+                const bool matchesViewFocus = (viewWindow == focusedChild || IsChild(viewWindow, focusedChild));
+                const bool matchesBrowserFocus = (browserWindow != NULL
+                    && (browserWindow == focusedChild || IsChild(browserWindow, focusedChild)));
+                if (matchesViewFocus || matchesBrowserFocus)
+                {
+                    *outView = candidateView.Detach();
+                    return S_OK;
+                }
+            }
+
+            if (!visibleCandidate && IsWindowVisible(viewWindow))
+            {
+                if (browserWindow == NULL || IsWindowVisible(browserWindow))
+                {
+                    visibleCandidate = candidateView;
+                }
+            }
+
+            if (!fallbackCandidate)
+            {
+                fallbackCandidate = candidateView;
+            }
+        }
+
+        if (visibleCandidate)
+        {
+            *outView = visibleCandidate.Detach();
+            return S_OK;
+        }
+        if (fallbackCandidate)
+        {
+            *outView = fallbackCandidate.Detach();
+            return S_OK;
+        }
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+
+    HRESULT CopyActiveExplorerPaths(HWND explorerWindow)
+    {
+        if (explorerWindow == NULL)
+        {
+            explorerWindow = GetForegroundWindow();
+        }
+
+        ComPtr<IFolderView> folderView;
+        HRESULT result = FindActiveExplorerFolderView(explorerWindow, &folderView);
+        if (FAILED(result) || !folderView)
+        {
+            return FAILED(result) ? result : E_FAIL;
+        }
+
+        return CopyFromFolderView(folderView.Get());
+    }
+
+    // -------------------------------------------------------------------------
+    // 前台窗口事件监听守护进程（--hotkey）
+    // -------------------------------------------------------------------------
+
+    HWND g_hotkeyHostWindow = NULL;
+    HotkeyConfig g_activeHotkeyConfig;
+    bool g_hotkeyCurrentlyRegistered = false;
+    bool g_hotkeySuspendedForProbe = false;
+
+    void UnbindActiveHotkey()
+    {
+        if (g_hotkeyCurrentlyRegistered && g_hotkeyHostWindow != NULL)
+        {
+            UnregisterHotKey(g_hotkeyHostWindow, kActiveHotkeyId);
+            g_hotkeyCurrentlyRegistered = false;
+        }
+    }
+
+    void SyncHotkeyWithForegroundWindow()
+    {
+        if (g_hotkeyHostWindow == NULL || g_hotkeySuspendedForProbe || !g_activeHotkeyConfig.enabled)
+        {
+            UnbindActiveHotkey();
+            return;
+        }
+
+        const HWND foreground = GetForegroundWindow();
+        if (IsExplorerTopLevelWindow(foreground))
+        {
+            if (!g_hotkeyCurrentlyRegistered)
+            {
+                if (RegisterHotKey(
+                    g_hotkeyHostWindow,
+                    kActiveHotkeyId,
+                    g_activeHotkeyConfig.modifiers | MOD_NOREPEAT,
+                    g_activeHotkeyConfig.virtualKey))
+                {
+                    g_hotkeyCurrentlyRegistered = true;
+                }
+            }
+        }
+        else
+        {
+            UnbindActiveHotkey();
+        }
+    }
+
+    void CALLBACK ForegroundWinEventProc(
+        HWINEVENTHOOK,
+        DWORD,
+        HWND,
+        LONG idObject,
+        LONG idChild,
+        DWORD,
+        DWORD)
+    {
+        if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF)
+        {
+            SyncHotkeyWithForegroundWindow();
+        }
+    }
+
+    LRESULT CALLBACK HotkeyHostWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        switch (message)
+        {
+        case WM_HOTKEY:
+            if (wParam == kActiveHotkeyId)
+            {
+                const HWND foreground = GetForegroundWindow();
+                if (IsExplorerTopLevelWindow(foreground))
+                {
+                    CopyActiveExplorerPaths(foreground);
+                }
+                return 0;
+            }
+            break;
+
+        case kMsgReloadHotkey:
+            g_hotkeySuspendedForProbe = false;
+            UnbindActiveHotkey();
+            g_activeHotkeyConfig = LoadHotkeyConfig();
+            SyncHotkeyWithForegroundWindow();
+            return 1;
+
+        case kMsgSuspendHotkey:
+            g_hotkeySuspendedForProbe = true;
+            UnbindActiveHotkey();
+            return 1;
+
+        case kMsgStopDaemon:
+        case WM_CLOSE:
+            UnbindActiveHotkey();
+            DestroyWindow(window);
+            return 0;
+
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+        }
+
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    void NotifyOrStartHotkeyDaemon()
+    {
+        const HWND existing = FindWindowW(kHotkeyWindowClass, NULL);
+        if (existing != NULL)
+        {
+            SendMessageTimeoutW(existing, kMsgReloadHotkey, 0, 0, SMTO_ABORTIFHUNG, 2000, NULL);
+            return;
+        }
+
+        const HotkeyConfig config = LoadHotkeyConfig();
+        if (!config.enabled)
+        {
+            return;
+        }
+
+        wchar_t exePath[MAX_PATH] = {};
+        if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0)
+        {
+            return;
+        }
+
+        std::wstring commandLine = L"\"" + std::wstring(exePath) + L"\" --hotkey";
+        STARTUPINFOW startup = {};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION processInfo = {};
+        if (CreateProcessW(
+            exePath,
+            &commandLine[0],
+            NULL,
+            NULL,
+            FALSE,
+            CREATE_NO_WINDOW,
+            NULL,
+            NULL,
+            &startup,
+            &processInfo))
+        {
+            CloseHandle(processInfo.hThread);
+            CloseHandle(processInfo.hProcess);
+        }
+    }
+
+    int RunHotkeyDaemon()
+    {
+        const HWND existing = FindWindowW(kHotkeyWindowClass, NULL);
+        if (existing != NULL)
+        {
+            SendMessageTimeoutW(existing, kMsgReloadHotkey, 0, 0, SMTO_ABORTIFHUNG, 2000, NULL);
+            return 0;
+        }
+
+        const HRESULT comResult = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        if (FAILED(comResult))
+        {
+            return 1;
+        }
+
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = HotkeyHostWndProc;
+        windowClass.hInstance = GetModuleHandleW(NULL);
+        windowClass.lpszClassName = kHotkeyWindowClass;
+        RegisterClassExW(&windowClass);
+
+        g_hotkeyHostWindow = CreateWindowExW(
+            0,
+            kHotkeyWindowClass,
+            L"DragonKnightK.CopyPathMenu.HotkeyHost",
+            WS_OVERLAPPED,
+            0, 0, 0, 0,
+            NULL,
+            NULL,
+            GetModuleHandleW(NULL),
+            NULL);
+        if (g_hotkeyHostWindow == NULL)
+        {
+            CoUninitialize();
+            return 1;
+        }
+
+        g_activeHotkeyConfig = LoadHotkeyConfig();
+        HWINEVENTHOOK foregroundHook = SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZEEND,
+            NULL,
+            ForegroundWinEventProc,
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+
+        SyncHotkeyWithForegroundWindow();
+
+        MSG message = {};
+        while (GetMessageW(&message, NULL, 0, 0) > 0)
+        {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        UnbindActiveHotkey();
+        if (foregroundHook != NULL)
+        {
+            UnhookWinEvent(foregroundHook);
+        }
+        g_hotkeyHostWindow = NULL;
+        CoUninitialize();
+        return 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // 原生 Win32 图形化快捷键配置对话框（--config）
+    // -------------------------------------------------------------------------
+
+    enum ConfigControlId
+    {
+        kCtrlHotkeyInput = 100,
+        kCtrlStatusLabel = 101,
+        kCtrlSaveButton = 102,
+        kCtrlDefaultButton = 103,
+        kCtrlDisableButton = 104,
+        kCtrlCloseButton = IDCANCEL
+    };
+
+    struct ConfigDialogState
+    {
+        HWND hotkeyBox = NULL;
+        HWND statusLabel = NULL;
+        HFONT uiFont = NULL;
+    };
+
+    WORD ModifiersToHotkeyControlFlags(UINT modifiers)
+    {
+        WORD flags = 0;
+        if ((modifiers & MOD_ALT) != 0)
+        {
+            flags |= HOTKEYF_ALT;
+        }
+        if ((modifiers & MOD_CONTROL) != 0)
+        {
+            flags |= HOTKEYF_CONTROL;
+        }
+        if ((modifiers & MOD_SHIFT) != 0)
+        {
+            flags |= HOTKEYF_SHIFT;
+        }
+        return flags;
+    }
+
+    UINT HotkeyControlFlagsToModifiers(BYTE flags)
+    {
+        UINT modifiers = 0;
+        if ((flags & HOTKEYF_ALT) != 0)
+        {
+            modifiers |= MOD_ALT;
+        }
+        if ((flags & HOTKEYF_CONTROL) != 0)
+        {
+            modifiers |= MOD_CONTROL;
+        }
+        if ((flags & HOTKEYF_SHIFT) != 0)
+        {
+            modifiers |= MOD_SHIFT;
+        }
+        return modifiers;
+    }
+
+    void UpdateConfigDialogDisplay(HWND dialog, const ConfigDialogState* state, const HotkeyConfig& config)
+    {
+        if (state == NULL)
+        {
+            return;
+        }
+
+        if (config.enabled)
+        {
+            const WORD hkFlags = ModifiersToHotkeyControlFlags(config.modifiers);
+            SendMessageW(
+                state->hotkeyBox,
+                HKM_SETHOTKEY,
+                MAKEWORD(static_cast<BYTE>(config.virtualKey), static_cast<BYTE>(hkFlags)),
+                0);
+        }
+        else
+        {
+            SendMessageW(state->hotkeyBox, HKM_SETHOTKEY, 0, 0);
+        }
+
+        std::wstring statusText = L"当前生效快捷键：" + FormatHotkeyText(config);
+        if (config.enabled)
+        {
+            statusText += L"  （选中文件时复制选中项，未选中时复制当前文件夹）";
+        }
+        SetWindowTextW(state->statusLabel, statusText.c_str());
+        InvalidateRect(dialog, NULL, TRUE);
+    }
+
+    bool ProbeHotkeyAvailability(HWND dialog, const HotkeyConfig& config)
+    {
+        if (!config.enabled)
+        {
+            return true;
+        }
+
+        const HWND daemon = FindWindowW(kHotkeyWindowClass, NULL);
+        if (daemon != NULL)
+        {
+            SendMessageTimeoutW(daemon, kMsgSuspendHotkey, 0, 0, SMTO_ABORTIFHUNG, 1000, NULL);
+        }
+
+        const BOOL canRegister = RegisterHotKey(
+            dialog,
+            kProbeHotkeyId,
+            config.modifiers | MOD_NOREPEAT,
+            config.virtualKey);
+        if (canRegister)
+        {
+            UnregisterHotKey(dialog, kProbeHotkeyId);
+        }
+
+        if (daemon != NULL)
+        {
+            SendMessageTimeoutW(daemon, kMsgReloadHotkey, 0, 0, SMTO_ABORTIFHUNG, 1000, NULL);
+        }
+
+        return canRegister != FALSE;
+    }
+
+    void ApplyAndSaveConfigFromDialog(HWND dialog, const ConfigDialogState* state, const HotkeyConfig& config)
+    {
+        if (config.enabled && !ProbeHotkeyAvailability(dialog, config))
+        {
+            const std::wstring conflictMsg =
+                L"无法设置快捷键 [ " + FormatHotkeyText(config) +
+                L" ]。\r\n\r\n原因：该组合键已被系统中其他后台软件全局占用，请尝试其他组合键（例如 Alt + C）。";
+            MessageBoxW(dialog, conflictMsg.c_str(), L"快捷键冲突 - CopyPathMenu", MB_OK | MB_ICONWARNING);
+            return;
+        }
+
+        const HRESULT saveResult = SaveHotkeyConfig(config);
+        if (FAILED(saveResult))
+        {
+            MessageBoxW(dialog, L"写入注册表快捷键配置失败。", L"CopyPathMenu", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        NotifyOrStartHotkeyDaemon();
+        UpdateConfigDialogDisplay(dialog, state, config);
+
+        const std::wstring message = config.enabled
+            ? (L"快捷键已更新为 [ " + FormatHotkeyText(config) + L" ] 并立即生效！\r\n\r\n• 在资源管理器中选中文件/文件夹后按下：复制全部选中路径\r\n• 未选中任何文件时按下：复制当前所在文件夹路径")
+            : L"已禁用资源管理器快捷键（右键菜单“复制路径”仍可正常使用）。";
+        MessageBoxW(dialog, message.c_str(), L"设置已生效 - CopyPathMenu", MB_OK | MB_ICONINFORMATION);
+    }
+
+    int ScaleBySystemDpi(int value, int dpi)
+    {
+        return MulDiv(value, dpi, 96);
+    }
+
+    LRESULT CALLBACK ConfigDialogWndProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam)
+    {
+        ConfigDialogState* state = reinterpret_cast<ConfigDialogState*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+
+        switch (message)
+        {
+        case WM_CREATE:
+        {
+            CREATESTRUCTW* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+            state = reinterpret_cast<ConfigDialogState*>(createStruct->lpCreateParams);
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
+
+            HDC screenDc = GetDC(window);
+            const int dpi = screenDc != NULL ? GetDeviceCaps(screenDc, LOGPIXELSX) : 96;
+            if (screenDc != NULL)
+            {
+                ReleaseDC(window, screenDc);
+            }
+
+            NONCLIENTMETRICSW metrics = {};
+            metrics.cbSize = sizeof(metrics);
+            if (SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0))
+            {
+                metrics.lfMessageFont.lfHeight = -MulDiv(9, dpi, 72);
+                state->uiFont = CreateFontIndirectW(&metrics.lfMessageFont);
+            }
+
+            const HINSTANCE instance = GetModuleHandleW(NULL);
+            HWND promptLabel = CreateWindowExW(
+                0,
+                L"STATIC",
+                L"请点击下方输入框，直接在键盘上按下想要设置的快捷键组合：\r\n（仅在文件资源管理器处于前台时激活，绝不干扰浏览器、终端或 IDE）",
+                WS_CHILD | WS_VISIBLE,
+                ScaleBySystemDpi(20, dpi),
+                ScaleBySystemDpi(16, dpi),
+                ScaleBySystemDpi(410, dpi),
+                ScaleBySystemDpi(40, dpi),
+                window,
+                NULL,
+                instance,
+                NULL);
+
+            state->hotkeyBox = CreateWindowExW(
+                0,
+                HOTKEY_CLASSW,
+                L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                ScaleBySystemDpi(20, dpi),
+                ScaleBySystemDpi(62, dpi),
+                ScaleBySystemDpi(410, dpi),
+                ScaleBySystemDpi(30, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlHotkeyInput)),
+                instance,
+                NULL);
+
+            SendMessageW(
+                state->hotkeyBox,
+                HKM_SETRULES,
+                HKCOMB_NONE | HKCOMB_S,
+                MAKELPARAM(HOTKEYF_ALT, 0));
+
+            state->statusLabel = CreateWindowExW(
+                0,
+                L"STATIC",
+                L"",
+                WS_CHILD | WS_VISIBLE,
+                ScaleBySystemDpi(20, dpi),
+                ScaleBySystemDpi(102, dpi),
+                ScaleBySystemDpi(410, dpi),
+                ScaleBySystemDpi(24, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlStatusLabel)),
+                instance,
+                NULL);
+
+            HWND saveButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"保存并生效",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+                ScaleBySystemDpi(20, dpi),
+                ScaleBySystemDpi(138, dpi),
+                ScaleBySystemDpi(105, dpi),
+                ScaleBySystemDpi(32, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlSaveButton)),
+                instance,
+                NULL);
+
+            HWND defaultButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"恢复默认 (Alt+C)",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                ScaleBySystemDpi(133, dpi),
+                ScaleBySystemDpi(138, dpi),
+                ScaleBySystemDpi(130, dpi),
+                ScaleBySystemDpi(32, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlDefaultButton)),
+                instance,
+                NULL);
+
+            HWND disableButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"禁用快捷键",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                ScaleBySystemDpi(271, dpi),
+                ScaleBySystemDpi(138, dpi),
+                ScaleBySystemDpi(92, dpi),
+                ScaleBySystemDpi(32, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlDisableButton)),
+                instance,
+                NULL);
+
+            HWND closeButton = CreateWindowExW(
+                0,
+                L"BUTTON",
+                L"关闭",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                ScaleBySystemDpi(371, dpi),
+                ScaleBySystemDpi(138, dpi),
+                ScaleBySystemDpi(59, dpi),
+                ScaleBySystemDpi(32, dpi),
+                window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlCloseButton)),
+                instance,
+                NULL);
+
+            if (state->uiFont != NULL)
+            {
+                const HWND controls[] = {
+                    promptLabel, state->hotkeyBox, state->statusLabel,
+                    saveButton, defaultButton, disableButton, closeButton
+                };
+                for (size_t i = 0; i < sizeof(controls) / sizeof(controls[0]); ++i)
+                {
+                    SendMessageW(controls[i], WM_SETFONT, reinterpret_cast<WPARAM>(state->uiFont), TRUE);
+                }
+            }
+
+            UpdateConfigDialogDisplay(window, state, LoadHotkeyConfig());
+            SetFocus(state->hotkeyBox);
+            return 0;
+        }
+
+        case WM_CTLCOLORSTATIC:
+        {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, GetSysColor(COLOR_WINDOWTEXT));
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        }
+
+        case WM_COMMAND:
+        {
+            const int controlId = LOWORD(wParam);
+            if (controlId == kCtrlSaveButton && state != NULL)
+            {
+                const LRESULT rawHotkey = SendMessageW(state->hotkeyBox, HKM_GETHOTKEY, 0, 0);
+                const BYTE virtualKey = LOBYTE(LOWORD(rawHotkey));
+                const BYTE controlFlags = HIBYTE(LOWORD(rawHotkey));
+                const UINT modifiers = HotkeyControlFlagsToModifiers(controlFlags);
+
+                if (!IsValidHotkeyCombination(modifiers, virtualKey))
+                {
+                    MessageBoxW(
+                        window,
+                        L"请先在输入框中按下有效的组合键（需包含 Alt 或 Ctrl，例如 Alt + C 或 Ctrl + Shift + C）。",
+                        L"提示 - CopyPathMenu",
+                        MB_OK | MB_ICONWARNING);
+                    SetFocus(state->hotkeyBox);
+                    return 0;
+                }
+
+                HotkeyConfig newConfig;
+                newConfig.enabled = true;
+                newConfig.modifiers = modifiers;
+                newConfig.virtualKey = virtualKey;
+                ApplyAndSaveConfigFromDialog(window, state, newConfig);
+                return 0;
+            }
+            if (controlId == kCtrlDefaultButton && state != NULL)
+            {
+                HotkeyConfig defaultConfig;
+                defaultConfig.enabled = true;
+                defaultConfig.modifiers = MOD_ALT;
+                defaultConfig.virtualKey = 'C';
+                ApplyAndSaveConfigFromDialog(window, state, defaultConfig);
+                return 0;
+            }
+            if (controlId == kCtrlDisableButton && state != NULL)
+            {
+                HotkeyConfig disabledConfig = LoadHotkeyConfig();
+                disabledConfig.enabled = false;
+                ApplyAndSaveConfigFromDialog(window, state, disabledConfig);
+                return 0;
+            }
+            if (controlId == kCtrlCloseButton)
+            {
+                DestroyWindow(window);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_CLOSE:
+            DestroyWindow(window);
+            return 0;
+
+        case WM_DESTROY:
+            if (state != NULL && state->uiFont != NULL)
+            {
+                DeleteObject(state->uiFont);
+                state->uiFont = NULL;
+            }
+            PostQuitMessage(0);
+            return 0;
+        }
+
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+
+    int RunHotkeyConfigDialog()
+    {
+        INITCOMMONCONTROLSEX icc = {};
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_HOTKEY_CLASS | ICC_STANDARD_CLASSES;
+        InitCommonControlsEx(&icc);
+
+        WNDCLASSEXW windowClass = {};
+        windowClass.cbSize = sizeof(windowClass);
+        windowClass.lpfnWndProc = ConfigDialogWndProc;
+        windowClass.hInstance = GetModuleHandleW(NULL);
+        windowClass.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        windowClass.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        windowClass.lpszClassName = kConfigWindowClass;
+        RegisterClassExW(&windowClass);
+
+        HDC screenDc = GetDC(NULL);
+        const int dpi = screenDc != NULL ? GetDeviceCaps(screenDc, LOGPIXELSX) : 96;
+        if (screenDc != NULL)
+        {
+            ReleaseDC(NULL, screenDc);
+        }
+
+        RECT rect = { 0, 0, ScaleBySystemDpi(450, dpi), ScaleBySystemDpi(190, dpi) };
+        const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        AdjustWindowRectEx(&rect, style, FALSE, 0);
+        const int windowWidth = rect.right - rect.left;
+        const int windowHeight = rect.bottom - rect.top;
+        const int posX = (GetSystemMetrics(SM_CXSCREEN) - windowWidth) / 2;
+        const int posY = (GetSystemMetrics(SM_CYSCREEN) - windowHeight) / 2;
+
+        ConfigDialogState state;
+        HWND dialog = CreateWindowExW(
+            0,
+            kConfigWindowClass,
+            L"CopyPathMenu 快捷键设置",
+            style | WS_VISIBLE,
+            posX,
+            posY,
+            windowWidth,
+            windowHeight,
+            NULL,
+            NULL,
+            GetModuleHandleW(NULL),
+            &state);
+        if (dialog == NULL)
+        {
+            return 1;
+        }
+
+        ShowWindow(dialog, SW_SHOW);
+        UpdateWindow(dialog);
+
+        MSG message = {};
+        while (GetMessageW(&message, NULL, 0, 0) > 0)
+        {
+            if (message.message == WM_KEYDOWN && message.wParam == VK_ESCAPE && GetFocus() != state.hotkeyBox)
+            {
+                DestroyWindow(dialog);
+                continue;
+            }
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        return 0;
+    }
+
+    int RunSetHotkeyCommandLine(const wchar_t* spec)
+    {
+        HotkeyConfig config;
+        if (!ParseHotkeyString(spec, &config))
+        {
+            return 1;
+        }
+        if (FAILED(SaveHotkeyConfig(config)))
+        {
+            return 2;
+        }
+        NotifyOrStartHotkeyDaemon();
+        return 0;
+    }
+
+    // -------------------------------------------------------------------------
+    // 命令行复制与入口分发
+    // -------------------------------------------------------------------------
+
     std::wstring NormalizeCommandLinePath(const wchar_t* argument)
     {
         if (IsEmptyArgument(argument))
@@ -1012,17 +2351,47 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
         {
             exitCode = SUCCEEDED(RunComServer()) ? 0 : 1;
         }
+        else if (argumentCount == 2 && lstrcmpiW(arguments[1], L"--hotkey") == 0)
+        {
+            exitCode = RunHotkeyDaemon();
+        }
+        else if (argumentCount == 2 && lstrcmpiW(arguments[1], L"--config") == 0)
+        {
+            exitCode = RunHotkeyConfigDialog();
+        }
+        else if (argumentCount == 3 && lstrcmpiW(arguments[1], L"--set-hotkey") == 0)
+        {
+            exitCode = RunSetHotkeyCommandLine(arguments[2]);
+        }
+        else if (argumentCount == 2 && lstrcmpiW(arguments[1], L"--get-hotkey") == 0)
+        {
+            const std::wstring text = FormatHotkeyText(LoadHotkeyConfig()) + L"\r\n";
+            WriteParentConsoleText(text.c_str());
+            exitCode = 0;
+        }
+        else if (argumentCount == 2 && lstrcmpiW(arguments[1], L"--copy-active") == 0)
+        {
+            if (SUCCEEDED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED)))
+            {
+                exitCode = SUCCEEDED(CopyActiveExplorerPaths(NULL)) ? 0 : 2;
+                CoUninitialize();
+            }
+        }
         else if (argumentCount == 2 && IsVersionArgument(arguments[1]))
         {
-            WriteParentConsoleText(L"DragonKnightK.CopyPathMenu 1.0.0\r\n");
+            WriteParentConsoleText(L"DragonKnightK.CopyPathMenu 1.1.0\r\n");
             exitCode = 0;
         }
         else if (argumentCount == 2 && IsHelpArgument(arguments[1]))
         {
             WriteParentConsoleText(
-                L"DragonKnightK.CopyPathMenu 1.0.0\r\n"
+                L"DragonKnightK.CopyPathMenu 1.1.0\r\n"
                 L"用法:\r\n"
                 L"  copy-path.exe --copy <路径1> [路径2 ...]\r\n"
+                L"  copy-path.exe --hotkey\r\n"
+                L"  copy-path.exe --config\r\n"
+                L"  copy-path.exe --set-hotkey <Alt+C|Ctrl+Shift+C|default|disable>\r\n"
+                L"  copy-path.exe --get-hotkey\r\n"
                 L"  copy-path.exe -Embedding\r\n"
                 L"  copy-path.exe --version\r\n");
             exitCode = 0;

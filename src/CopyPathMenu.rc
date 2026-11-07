@@ -1,9 +1,11 @@
 #include <winver.h>
 #pragma code_page(65001)
 
+1 24 "CopyPathMenu.manifest"
+
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,0,0,0
-PRODUCTVERSION  1,0,0,0
+FILEVERSION     1,1,0,0
+PRODUCTVERSION  1,1,0,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 #ifdef _DEBUG
 FILEFLAGS       VS_FF_DEBUG
@@ -19,13 +21,13 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "CompanyName",      "DragonKnightK\0"
-            VALUE "FileDescription",  "Windows 右键菜单“复制路径”本地 COM 服务\0"
-            VALUE "FileVersion",      "1.0.0.0\0"
+            VALUE "FileDescription",  "Windows 右键菜单与快捷键“复制路径”服务\0"
+            VALUE "FileVersion",      "1.1.0.0\0"
             VALUE "InternalName",     "copy-path.exe\0"
             VALUE "LegalCopyright",   "Copyright (c) DragonKnightK. MIT License.\0"
             VALUE "OriginalFilename", "copy-path.exe\0"
             VALUE "ProductName",      "DragonKnightK.CopyPathMenu\0"
-            VALUE "ProductVersion",   "1.0.0.0\0"
+            VALUE "ProductVersion",   "1.1.0.0\0"
         END
     END
     BLOCK "VarFileInfo"

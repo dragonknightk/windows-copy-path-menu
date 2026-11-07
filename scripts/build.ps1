@@ -140,7 +140,11 @@ $compilerArguments = @(
     'shell32.lib',
     'user32.lib',
     'uuid.lib',
-    'propsys.lib'
+    'uuid.lib',
+    'propsys.lib',
+    'advapi32.lib',
+    'comctl32.lib',
+    'gdi32.lib'
 )
 
 try {
@@ -153,6 +157,7 @@ try {
             "/fo$resPath",
             ('/I' + (Join-Path $sdkDirectory.FullName 'um')),
             ('/I' + (Join-Path $sdkDirectory.FullName 'shared')),
+            ('/I' + (Join-Path $projectRoot 'src')),
             $rcSourcePath
         )
         $rcOutput = & $rcPath @rcArguments 2>&1

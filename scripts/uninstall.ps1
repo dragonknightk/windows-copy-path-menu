@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     此脚本仅删除带有 CopyPathMenuOwner=DragonKnightK.CopyPathMenu 标记的产品专属
-    注册表键，以及 C:\Program Files\CopyPathMenu\copy-path.exe。
+    注册表键、开机自启项、快捷键配置键，以及 C:\Program Files\CopyPathMenu\copy-path.exe。
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -19,6 +19,7 @@ $clsid = '{7E4DC989-2ABA-458A-94D3-A350A352C32E}'
 $installDirectory = Join-Path -Path $env:ProgramFiles -ChildPath $productName
 $installedExe = Join-Path -Path $installDirectory -ChildPath 'copy-path.exe'
 $classesRoot = 'HKLM:\Software\Classes'
+$runKeyPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
 $logDirectory = Join-Path -Path $env:ProgramData -ChildPath $productName
 $transcriptStarted = $false
 
@@ -145,6 +146,24 @@ try {
         if (Test-Path -LiteralPath $registryPath) {
             Remove-Item -LiteralPath $registryPath -Recurse -Force
             Write-Output "已删除产品专属注册表键：$registryPath"
+        }
+    }
+
+    if (Test-Path -LiteralPath $runKeyPath) {
+        if ($null -ne (Get-Item -LiteralPath $runKeyPath).GetValue($productOwner, $null)) {
+            Remove-ItemProperty -LiteralPath $runKeyPath -Name $productOwner -Force
+            Write-Output "已删除开机自启注册表项：$runKeyPath [$productOwner]"
+        }
+    }
+
+    $configPaths = @(
+        "HKCU:\Software\$productOwner",
+        "HKLM:\Software\$productOwner"
+    )
+    foreach ($configPath in $configPaths) {
+        if (Test-Path -LiteralPath $configPath) {
+            Remove-Item -LiteralPath $configPath -Recurse -Force
+            Write-Output "已删除快捷键配置注册表键：$configPath"
         }
     }
 

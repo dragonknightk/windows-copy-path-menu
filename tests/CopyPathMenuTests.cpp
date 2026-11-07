@@ -47,7 +47,8 @@ void Check(HRESULT result)
 class ViewSite final : public IServiceProvider, public IFolderView
 {
 public:
-    explicit ViewSite(IShellItemArray* items) : items_(items) {}
+    explicit ViewSite(IShellItemArray* items, IShellItemArray* selection = NULL, const std::wstring& folderPath = L"")
+        : items_(items), selection_(selection), folderPath_(folderPath) {}
     HRESULT enumerationResult = S_OK;
     UINT requestedFlags = 0;
 
@@ -78,17 +79,42 @@ public:
     }
     STDMETHODIMP Items(UINT flags, REFIID id, void** object) override
     {
-        requestedFlags = flags;
         if (object == NULL) return E_POINTER;
         *object = NULL;
         if (FAILED(enumerationResult)) return enumerationResult;
+        if (flags == SVGIO_SELECTION)
+        {
+            if (selection_ == NULL) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+            return selection_->QueryInterface(id, object);
+        }
+        requestedFlags = flags;
         return items_->QueryInterface(id, object);
     }
     STDMETHODIMP GetCurrentViewMode(UINT*) override { return E_NOTIMPL; }
     STDMETHODIMP SetCurrentViewMode(UINT) override { return E_NOTIMPL; }
-    STDMETHODIMP GetFolder(REFIID, void**) override { return E_NOTIMPL; }
+    STDMETHODIMP GetFolder(REFIID id, void** object) override
+    {
+        if (object == NULL) return E_POINTER;
+        *object = NULL;
+        if (folderPath_.empty()) return E_NOTIMPL;
+        return SHCreateItemFromParsingName(folderPath_.c_str(), NULL, id, object);
+    }
     STDMETHODIMP Item(int, PITEMID_CHILD*) override { return E_NOTIMPL; }
-    STDMETHODIMP ItemCount(UINT, int*) override { return E_NOTIMPL; }
+    STDMETHODIMP ItemCount(UINT flags, int* count) override
+    {
+        if (count == NULL) return E_POINTER;
+        *count = 0;
+        if (flags == SVGIO_SELECTION)
+        {
+            if (selection_ == NULL) return S_OK;
+            DWORD itemCount = 0;
+            HRESULT result = selection_->GetCount(&itemCount);
+            if (FAILED(result)) return result;
+            *count = static_cast<int>(itemCount);
+            return S_OK;
+        }
+        return E_NOTIMPL;
+    }
     STDMETHODIMP GetSelectionMarkedItem(int*) override { return E_NOTIMPL; }
     STDMETHODIMP GetFocusedItem(int*) override { return E_NOTIMPL; }
     STDMETHODIMP GetItemPosition(PCUITEMID_CHILD, POINT*) override { return E_NOTIMPL; }
@@ -100,6 +126,8 @@ public:
 private:
     LONG references_ = 1;
     ComPtr<IShellItemArray> items_;
+    ComPtr<IShellItemArray> selection_;
+    std::wstring folderPath_;
 };
 
 class Fixture
@@ -130,6 +158,7 @@ public:
         for (const auto& path : paths) DeleteFileW(path.c_str());
         RemoveDirectoryW(root_.c_str());
     }
+    const std::wstring& Root() const { return root_; }
     ComPtr<IShellItemArray> Array(const std::vector<size_t>& order) const
     {
         std::vector<PIDLIST_ABSOLUTE> pidls;
@@ -191,7 +220,7 @@ void ExpectOrder(const Fixture& fixture, const char* name, const std::vector<siz
     Check(ExecuteSelection(selection.Get(), site.Get()));
     Require(capturedText == fixture.Text(expected), "Unexpected path order or formatting");
     Require(clipboardWrites == 1, "Selection must write once");
-    Require(site->requestedFlags == (SVGIO_ALLVIEW | SVGIO_FLAG_VIEWORDER), "Must order the original snapshot by all view items");
+    Require(site->requestedFlags == static_cast<UINT>(SVGIO_ALLVIEW | SVGIO_FLAG_VIEWORDER), "Must order the original snapshot by all view items");
     std::cout << "PASS " << name << '\n';
 }
 
@@ -269,6 +298,75 @@ void TestDirectoryFallbackAndCommandLine()
     std::cout << "PASS command-line drive root %V normalization\n";
 }
 
+void TestHotkeyCopyFromFolderView(const Fixture& fixture)
+{
+    auto visibleItems = fixture.Array({0, 1, 2, 3, 4});
+    auto multiSelected = fixture.Array({3, 1});
+    ComPtr<ViewSite> multiSite;
+    multiSite.Attach(new ViewSite(visibleItems.Get(), multiSelected.Get(), fixture.Root()));
+    capturedText = L"existing clipboard";
+    clipboardWrites = 0;
+    Check(CopyFromFolderView(multiSite.Get()));
+    if (capturedMemory != NULL)
+    {
+        GlobalFree(capturedMemory);
+        capturedMemory = NULL;
+    }
+    Require(capturedText == fixture.Text({1, 3}) && clipboardWrites == 1, "Hotkey multi-selection visual order failed");
+    std::cout << "PASS hotkey CopyFromFolderView multi-selection in visual order\n";
+
+    auto singleSelected = fixture.Array({3});
+    ComPtr<ViewSite> singleSite;
+    singleSite.Attach(new ViewSite(visibleItems.Get(), singleSelected.Get(), fixture.Root()));
+    capturedText = L"existing clipboard";
+    clipboardWrites = 0;
+    Check(CopyFromFolderView(singleSite.Get()));
+    if (capturedMemory != NULL)
+    {
+        GlobalFree(capturedMemory);
+        capturedMemory = NULL;
+    }
+    Require(capturedText == fixture.Text({3}) && clipboardWrites == 1, "Hotkey single-selection copy failed");
+    std::cout << "PASS hotkey CopyFromFolderView single-selection\n";
+
+    ComPtr<ViewSite> emptySelectionSite;
+    emptySelectionSite.Attach(new ViewSite(visibleItems.Get(), NULL, fixture.Root()));
+    capturedText = L"existing clipboard";
+    clipboardWrites = 0;
+    Check(CopyFromFolderView(emptySelectionSite.Get()));
+    if (capturedMemory != NULL)
+    {
+        GlobalFree(capturedMemory);
+        capturedMemory = NULL;
+    }
+    Require(capturedText == fixture.Root() && clipboardWrites == 1, "Hotkey zero-selection current folder fallback failed");
+    std::cout << "PASS hotkey CopyFromFolderView zero-selection falls back to current folder\n";
+}
+
+void TestHotkeyConfigParsingAndFormatting()
+{
+    HotkeyConfig config;
+    Require(config.enabled && config.modifiers == MOD_ALT && config.virtualKey == 'C', "Default hotkey must be Alt+C");
+    Require(FormatHotkeyText(config) == L"Alt + C", "Default hotkey text format mismatch");
+
+    Require(ParseHotkeyString(L"Ctrl + Shift + C", &config), "Parse Ctrl+Shift+C failed");
+    Require(config.enabled && config.modifiers == (MOD_CONTROL | MOD_SHIFT) && config.virtualKey == 'C', "Ctrl+Shift+C state mismatch");
+    Require(FormatHotkeyText(config) == L"Ctrl + Shift + C", "Ctrl+Shift+C format mismatch");
+
+    Require(ParseHotkeyString(L"Ctrl+Alt+F9", &config), "Parse Ctrl+Alt+F9 failed");
+    Require(config.enabled && config.modifiers == (MOD_CONTROL | MOD_ALT) && config.virtualKey == VK_F9, "Ctrl+Alt+F9 state mismatch");
+    Require(FormatHotkeyText(config) == L"Ctrl + Alt + F9", "Ctrl+Alt+F9 format mismatch");
+
+    Require(ParseHotkeyString(L"disable", &config), "Parse disable failed");
+    Require(!config.enabled, "Disable flag did not set enabled=false");
+
+    Require(ParseHotkeyString(L"default", &config), "Parse default failed");
+    Require(config.enabled && config.modifiers == MOD_ALT && config.virtualKey == 'C', "Default reset failed");
+
+    Require(!ParseHotkeyString(L"C", &config), "Bare letter key without modifier must be rejected");
+    std::cout << "PASS hotkey parsing, validation and formatting\n";
+}
+
 int wmain()
 {
     if (FAILED(CoInitializeEx(NULL, COINIT_APARTMENTTHREADED))) return 2;
@@ -308,7 +406,9 @@ int wmain()
         ExpectFailure(virtualSelection.Get(), NULL, "non-filesystem selection fails atomically");
         TestComContract(fixture);
         TestDirectoryFallbackAndCommandLine();
-        std::cout << "All 15 test cases passed.\n";
+        TestHotkeyCopyFromFolderView(fixture);
+        TestHotkeyConfigParsingAndFormatting();
+        std::cout << "All 19 test cases passed.\n";
     }
     catch (const ShellOperationError& error)
     {

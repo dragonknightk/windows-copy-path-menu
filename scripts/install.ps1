@@ -5,7 +5,7 @@
 
 .DESCRIPTION
     此脚本仅部署已封存的 release\copy-path.exe，并只写入带有
-    CopyPathMenuOwner=DragonKnightK.CopyPathMenu 标记的产品专属注册表键。
+    CopyPathMenuOwner=DragonKnightK.CopyPathMenu 标记的产品专属注册表键及开机自启项。
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +22,8 @@ $checksumFile = Join-Path -Path $projectRoot -ChildPath 'release\SHA256SUMS.txt'
 $installDirectory = Join-Path -Path $env:ProgramFiles -ChildPath $productName
 $installedExe = Join-Path -Path $installDirectory -ChildPath 'copy-path.exe'
 $classesRoot = 'HKLM:\Software\Classes'
+$runKeyPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
+$runValueName = $productOwner
 $logDirectory = Join-Path -Path $env:ProgramData -ChildPath $productName
 $transcriptStarted = $false
 $temporaryDirectory = $null
@@ -30,6 +32,7 @@ $replaceBackupFile = $null
 $mutationStarted = $false
 $installDirectoryExisted = $false
 $registrySnapshots = @()
+$runValueSnapshot = $null
 $fileSnapshot = $null
 $releaseHash = $null
 
@@ -198,6 +201,17 @@ function Backup-RegistryState {
     }
 }
 
+function Backup-RunValueState {
+    $existingValue = $null
+    if (Test-Path -LiteralPath $runKeyPath) {
+        $existingValue = (Get-Item -LiteralPath $runKeyPath).GetValue($runValueName, $null)
+    }
+    $script:runValueSnapshot = [PSCustomObject]@{
+        Exists = ($null -ne $existingValue)
+        Value = [string]$existingValue
+    }
+}
+
 function Backup-InstalledExe {
     if (Test-Path -LiteralPath $installedExe) {
         if (-not (Test-Path -LiteralPath $installedExe -PathType Leaf)) {
@@ -245,6 +259,23 @@ function Restore-PreviousState {
             catch {
                 $rollbackErrors += "无法恢复注册表键 $($snapshot.Path)：$($_.Exception.Message)"
             }
+        }
+    }
+
+    if ((Test-Path -LiteralPath 'variable:runValueSnapshot') -and $null -ne $runValueSnapshot) {
+        try {
+            if ($runValueSnapshot.Exists) {
+                New-Item -Path $runKeyPath -Force | Out-Null
+                Set-RegistryString -Path $runKeyPath -Name $runValueName -Value $runValueSnapshot.Value
+            }
+            elseif (Test-Path -LiteralPath $runKeyPath) {
+                if ($null -ne (Get-Item -LiteralPath $runKeyPath).GetValue($runValueName, $null)) {
+                    Remove-ItemProperty -LiteralPath $runKeyPath -Name $runValueName -Force
+                }
+            }
+        }
+        catch {
+            $rollbackErrors += "无法恢复开机自启注册表项 $($runKeyPath)\$($runValueName)：$($_.Exception.Message)"
         }
     }
 
@@ -343,6 +374,7 @@ try {
     $temporaryDirectory = Join-Path -Path ([IO.Path]::GetTempPath()) -ChildPath ('CopyPathMenu-' + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $temporaryDirectory -Force | Out-Null
     Backup-InstalledExe
+    Backup-RunValueState
     $index = 0
     foreach ($registryPath in $registryPaths) {
         Backup-RegistryState -Path $registryPath -Index $index
@@ -393,7 +425,17 @@ try {
     New-Item -Path $backgroundCommandPath -Force | Out-Null
     Set-RegistryString -Path $backgroundCommandPath -Value ('"' + $installedExe + '" --copy "%V"')
 
+    New-Item -Path $runKeyPath -Force | Out-Null
+    Set-RegistryString -Path $runKeyPath -Name $runValueName -Value ('"' + $installedExe + '" --hotkey')
+
     Notify-ShellAssociationChanged
+    try {
+        Start-Process -FilePath $installedExe -ArgumentList '--hotkey' -WindowStyle Hidden
+        Write-Output '已启动后台快捷键监听服务（默认快捷键：Alt + C，可运行 set-hotkey.bat 自定义）。'
+    }
+    catch {
+        Write-Warning "安装已完成，但未能立即启动快捷键监听进程：$($_.Exception.Message)"
+    }
     Write-Output "安装完成：$installedExe"
     Write-Output "安装日志：$logFile"
 }
