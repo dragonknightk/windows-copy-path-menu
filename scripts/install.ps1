@@ -265,7 +265,7 @@ function Restore-PreviousState {
     if ((Test-Path -LiteralPath 'variable:runValueSnapshot') -and $null -ne $runValueSnapshot) {
         try {
             if ($runValueSnapshot.Exists) {
-                New-Item -Path $runKeyPath -Force | Out-Null
+                if (-not (Test-Path -LiteralPath $runKeyPath)) { New-Item -Path $runKeyPath | Out-Null }
                 Set-RegistryString -Path $runKeyPath -Name $runValueName -Value $runValueSnapshot.Value
             }
             elseif (Test-Path -LiteralPath $runKeyPath) {
@@ -425,7 +425,7 @@ try {
     New-Item -Path $backgroundCommandPath -Force | Out-Null
     Set-RegistryString -Path $backgroundCommandPath -Value ('"' + $installedExe + '" --copy "%V"')
 
-    New-Item -Path $runKeyPath -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $runKeyPath)) { New-Item -Path $runKeyPath | Out-Null }
     Set-RegistryString -Path $runKeyPath -Name $runValueName -Value ('"' + $installedExe + '" --hotkey')
 
     Notify-ShellAssociationChanged
