@@ -1824,7 +1824,7 @@ namespace
         std::wstring statusText = L"当前生效快捷键：" + FormatHotkeyText(config);
         if (config.enabled)
         {
-            statusText += L"  （选中文件时复制选中项，未选中时复制当前文件夹）";
+            statusText += L"\r\n功能说明：选中文件时复制选中项，未选中时复制当前文件夹路径";
         }
         SetWindowTextW(state->statusLabel, statusText.c_str());
         InvalidateRect(dialog, NULL, TRUE);
@@ -1928,7 +1928,7 @@ namespace
                 WS_CHILD | WS_VISIBLE,
                 ScaleBySystemDpi(20, dpi),
                 ScaleBySystemDpi(16, dpi),
-                ScaleBySystemDpi(410, dpi),
+                ScaleBySystemDpi(440, dpi),
                 ScaleBySystemDpi(40, dpi),
                 window,
                 NULL,
@@ -1942,7 +1942,7 @@ namespace
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
                 ScaleBySystemDpi(20, dpi),
                 ScaleBySystemDpi(62, dpi),
-                ScaleBySystemDpi(410, dpi),
+                ScaleBySystemDpi(440, dpi),
                 ScaleBySystemDpi(30, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlHotkeyInput)),
@@ -1962,8 +1962,8 @@ namespace
                 WS_CHILD | WS_VISIBLE,
                 ScaleBySystemDpi(20, dpi),
                 ScaleBySystemDpi(102, dpi),
-                ScaleBySystemDpi(410, dpi),
-                ScaleBySystemDpi(24, dpi),
+                ScaleBySystemDpi(440, dpi),
+                ScaleBySystemDpi(42, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlStatusLabel)),
                 instance,
@@ -1975,8 +1975,8 @@ namespace
                 L"保存并生效",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
                 ScaleBySystemDpi(20, dpi),
-                ScaleBySystemDpi(138, dpi),
-                ScaleBySystemDpi(105, dpi),
+                ScaleBySystemDpi(156, dpi),
+                ScaleBySystemDpi(112, dpi),
                 ScaleBySystemDpi(32, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlSaveButton)),
@@ -1988,9 +1988,9 @@ namespace
                 L"BUTTON",
                 L"恢复默认 (Alt+C)",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                ScaleBySystemDpi(133, dpi),
-                ScaleBySystemDpi(138, dpi),
-                ScaleBySystemDpi(130, dpi),
+                ScaleBySystemDpi(142, dpi),
+                ScaleBySystemDpi(156, dpi),
+                ScaleBySystemDpi(136, dpi),
                 ScaleBySystemDpi(32, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlDefaultButton)),
@@ -2002,9 +2002,9 @@ namespace
                 L"BUTTON",
                 L"禁用快捷键",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                ScaleBySystemDpi(271, dpi),
-                ScaleBySystemDpi(138, dpi),
-                ScaleBySystemDpi(92, dpi),
+                ScaleBySystemDpi(288, dpi),
+                ScaleBySystemDpi(156, dpi),
+                ScaleBySystemDpi(98, dpi),
                 ScaleBySystemDpi(32, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlDisableButton)),
@@ -2016,9 +2016,9 @@ namespace
                 L"BUTTON",
                 L"关闭",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                ScaleBySystemDpi(371, dpi),
-                ScaleBySystemDpi(138, dpi),
-                ScaleBySystemDpi(59, dpi),
+                ScaleBySystemDpi(396, dpi),
+                ScaleBySystemDpi(156, dpi),
+                ScaleBySystemDpi(64, dpi),
                 ScaleBySystemDpi(32, dpi),
                 window,
                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlCloseButton)),
@@ -2143,7 +2143,7 @@ namespace
             ReleaseDC(NULL, screenDc);
         }
 
-        RECT rect = { 0, 0, ScaleBySystemDpi(450, dpi), ScaleBySystemDpi(190, dpi) };
+        RECT rect = { 0, 0, ScaleBySystemDpi(480, dpi), ScaleBySystemDpi(208, dpi) };
         const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
         AdjustWindowRectEx(&rect, style, FALSE, 0);
         const int windowWidth = rect.right - rect.left;
